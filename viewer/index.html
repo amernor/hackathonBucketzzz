@@ -4,6 +4,10 @@
 <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
 <style>#v{position:absolute;inset:0}</style>
 </head><body>
+<div style="position:absolute;z-index:9;top:8px;left:8px">
+  <button onclick="moveCar()">Move selected car</button>
+  <button onclick="deleteCar()">Delete selected car</button>
+</div>
 <div id="v"></div>
 <script>const URN="dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6Y3l2bC1oYWNrLXhhdmllci9zY2VuZS5vYmo";</script>
 <script src="viewer.js"></script>

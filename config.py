@@ -7,7 +7,7 @@ load_dotenv()
 APS_HOST = "https://developer.api.autodesk.com"
 APS_CLIENT_ID = os.environ.get("APS_CLIENT_ID", "")
 APS_CLIENT_SECRET = os.environ.get("APS_CLIENT_SECRET", "")
-APS_SCOPES = "data:read data:write data:create bucket:create bucket:read viewer:read"
+APS_SCOPES = "data:read data:write data:create bucket:create bucket:read"
 
 # Cyvl data
 AWS_PROFILE = os.environ.get("AWS_PROFILE", "cyvl-hackathon")

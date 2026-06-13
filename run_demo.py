@@ -20,6 +20,8 @@ SCENE_OBJ = os.path.join(OUT_DIR, 'scene.obj')   # produced by the real run.py p
 SCENE_MTL = os.path.join(OUT_DIR, 'scene.mtl')
 
 APS_BUCKET = os.environ.get("APS_BUCKET", "cyvl-hack-xavier")
+# bump to mint fresh object keys -> fresh URNs (defeats stale APS/browser derivative cache)
+APS_KEY_VER = os.environ.get("APS_KEY_VER", "v3")
 
 # Locations whose baseline is the real Cyvl scene from run.py (the rest are mock).
 # morrison_ave is the dense tile-center of the downloaded tile (ROI override unset).
@@ -47,7 +49,11 @@ def aps_upload_translate(file_path):
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(file_path, obj_name)
             z.write(mtl_path, os.path.basename(mtl_path))
-        key = os.path.basename(zip_path)
+            # proposed OBJs also reference the baseline scene.mtl — include it so the
+            # baseline geometry keeps its materials (otherwise it renders grey).
+            if os.path.exists(SCENE_MTL) and os.path.basename(SCENE_MTL) != os.path.basename(mtl_path):
+                z.write(SCENE_MTL, os.path.basename(SCENE_MTL))
+        key = os.path.basename(zip_path)[:-4] + f"_{APS_KEY_VER}.zip"
         urn = upload_object(token, APS_BUCKET, key, zip_path)
         start_translation(token, urn, root_filename=obj_name)
     else:

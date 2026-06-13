@@ -27,6 +27,10 @@
         .repair-btn.active { border-color: var(--blue); }
         .impact-panel { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); display: none; }
         .toggle-container { position: absolute; top: 1rem; right: 1rem; z-index: 10; background: white; padding: 0.75rem; border-radius: 8px; display: none; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        #viewer-controls { position: absolute; top: 1rem; left: 1rem; z-index: 10; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+        #viewer-controls button { font: 600 0.8rem sans-serif; padding: 0.4rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; background: white; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+        #viewer-controls button:disabled { opacity: 0.45; cursor: not-allowed; }
+        #objects-badge { background: #DEFF00; padding: 0.25rem 0.6rem; border-radius: 6px; font: 700 0.75rem sans-serif; }
     </style>
 </head>
 <body>
@@ -54,6 +58,17 @@
             <div class="toggle-container" id="repair-toggle">
                 <label><input type="checkbox" id="show-proposed-cb" onchange="toggleViewer()"> Show proposed repair</label>
                 <div id="urn-status" style="font-size: 0.8rem; color: gray;"></div>
+                <div id="fix-legend" style="display:none; margin-top:0.5rem; font-size:0.75rem; line-height:1.5;">
+                    <div><span style="display:inline-block;width:11px;height:11px;background:#F5A623;border-radius:2px;vertical-align:middle;"></span> new detectable warning strip</div>
+                    <div id="fix-legend-ramp"><span style="display:inline-block;width:11px;height:11px;background:#ededed;border:1px solid #bbb;border-radius:2px;vertical-align:middle;"></span> reconstructed ramp surface</div>
+                    <button onclick="zoomToFix()" style="margin-top:0.4rem; font:600 0.75rem sans-serif; padding:0.3rem 0.6rem; border:1px solid var(--blue); border-radius:6px; background:white; cursor:pointer;">🔍 Zoom to fix</button>
+                </div>
+            </div>
+            <div id="viewer-controls">
+                <button onclick="togglePoints()" id="btn-points">Toggle point cloud</button>
+                <button onclick="moveSelected()">Move selected</button>
+                <button onclick="deleteSelected()">Delete selected</button>
+                <span id="objects-badge"></span>
             </div>
             <div id="aps-viewer"></div>
         </div>
@@ -62,6 +77,8 @@
 <script>
     let viewer, currentLoc, currentRepair, baselineUrn, proposedUrn, locCache;
     let viewerReady=false, viewerIniting=false, pendingUrn=null;
+    let selectedDbId=null, lidarPoints=null, lidarVisible=false, pointsBuf=undefined, overlayMade=false;
+    let showingProposed=false, firstFitDone=false;
     const fMoney = n => '$' + n.toLocaleString();
 
     async function init() {
@@ -81,10 +98,11 @@
         document.getElementById('view-b').style.display='none';
         if(viewer) viewer.finish();
         viewer=null; viewerReady=false; viewerIniting=false; pendingUrn=null;
+        selectedDbId=null; lidarPoints=null; lidarVisible=false; pointsBuf=undefined; overlayMade=false; showingProposed=false; firstFitDone=false;
     }
 
     async function loadLoc(id) {
-        currentLoc=id; currentRepair=null;
+        currentLoc=id; currentRepair=null; firstFitDone=false;
         document.getElementById('view-a').style.display='none';
         document.getElementById('view-b').style.display='flex';
         document.getElementById('impact-panel').style.display='none';
@@ -119,6 +137,8 @@
         document.querySelectorAll('.repair-btn').forEach(b=>b.classList.remove('active'));
         document.getElementById(`btn-${rId}`).classList.add('active');
         document.getElementById('show-proposed-cb').checked=false;
+        showingProposed=false;
+        document.getElementById('fix-legend').style.display='none';
 
         const res = await fetch(`/api/impact/${currentLoc}/${rId}`);
         const imp = await res.json();
@@ -150,8 +170,17 @@
 
     function toggleViewer() {
         const show = document.getElementById('show-proposed-cb').checked;
-        if(show && proposedUrn) loadModel(proposedUrn);
-        else if(!show && baselineUrn) loadModel(baselineUrn);
+        showingProposed = show && !!proposedUrn;
+        const legend = document.getElementById('fix-legend');
+        if(showingProposed){
+            loadModel(proposedUrn);
+            document.getElementById('fix-legend-ramp').style.display =
+                (currentRepair && currentRepair.indexOf('domes_only') === -1) ? 'block' : 'none';
+            legend.style.display = 'block';
+        } else {
+            legend.style.display = 'none';
+            if(baselineUrn) loadModel(baselineUrn);
+        }
     }
 
     function initViewer() {
@@ -172,8 +201,13 @@
             // Fix the up vector and frame the model each time geometry finishes loading.
             viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, () => {
                 try { viewer.navigation.setWorldUpVector(new THREE.Vector3(0,0,1), true); } catch(e){}
-                viewer.fitToView();
+                if(!firstFitDone){ viewer.fitToView(); firstFitDone=true; }   // fit once; keep camera on toggle
+                setupPointCloud();
+                if(showingProposed) setTimeout(highlightProposed, 300);
             });
+            viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT,
+                e => { selectedDbId = (e.dbIdArray && e.dbIdArray[0]) != null ? e.dbIdArray[0] : null; });
+            viewer.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, updateObjectsBadge);
             viewerReady = true;
             if(pendingUrn){ const u = pendingUrn; pendingUrn = null; loadModel(u); }
         });
@@ -189,6 +223,105 @@
             console.error('APS Document.load failed:', code, msg);
             const s = document.getElementById('urn-status'); if(s) s.innerText = 'Viewer load error '+code;
         });
+    }
+
+    // --- ported from the original deploy/viewer.js ---
+
+    function updateObjectsBadge() {
+        const badge = document.getElementById('objects-badge');
+        if(!badge || !viewer || !viewer.model) return;
+        const tree = viewer.model.getInstanceTree(); if(!tree) return;
+        const leaves = [];
+        tree.enumNodeChildren(tree.getRootId(),
+            id => { if(tree.getChildCount(id) === 0) leaves.push(tree.getNodeName(id) || id); }, true);
+        badge.textContent = 'objects loaded: ' + leaves.length;
+        badge.title = leaves.join(', ');
+        console.log('leaf objects (' + leaves.length + '):', leaves);
+    }
+
+    function moveSelected() {
+        if(selectedDbId == null) return alert('Select an object in the scene first');
+        const tree = viewer.model.getInstanceTree();
+        tree.enumNodeFragments(selectedDbId, fragId => {
+            const fp = viewer.impl.getFragmentProxy(viewer.model, fragId);
+            fp.getAnimTransform(); fp.position.x += 5; fp.updateAnimTransform();   // slide 5 m along X
+        });
+        viewer.impl.invalidate(true, true, true);
+    }
+
+    function deleteSelected() {
+        if(selectedDbId == null) return alert('Select an object in the scene first');
+        viewer.hide(selectedDbId);
+    }
+
+    // Raw LiDAR points (XYZ+RGB) as a three.js PointCloud overlay inside the Viewer.
+    function setupPointCloud() {
+        const got = (pointsBuf !== undefined)
+            ? Promise.resolve(pointsBuf)
+            : fetch('/static/points.bin').then(r => r.ok ? r.arrayBuffer() : null).catch(() => null);
+        got.then(buf => {
+            pointsBuf = buf;                                  // cache (null if none for this scene)
+            const btn = document.getElementById('btn-points');
+            if(!buf){ if(btn){ btn.disabled = true; btn.title = 'No point cloud for this location'; } return; }
+            if(btn){ btn.disabled = false; }
+            const count = new Uint32Array(buf, 0, 1)[0];
+            const positions = new Float32Array(buf, 4, count * 3);
+            const rgb = new Uint8Array(buf, 4 + count * 12, count * 3);
+            const colors = new Float32Array(count * 3);
+            for(let i = 0; i < count * 3; i++) colors[i] = rgb[i] / 255;
+            const geometry = new THREE.BufferGeometry();
+            geometry.addAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.addAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.computeBoundingBox(); geometry.isPoints = true;
+            const material = new THREE.PointCloudMaterial({ size: 0.25, vertexColors: THREE.VertexColors });
+            const points = new THREE.PointCloud(geometry, material);
+            // align overlay to the model's global offset / placement
+            const data = viewer.model.getData();
+            if(data.placementWithOffset) points.applyMatrix(data.placementWithOffset);
+            else if(data.globalOffset) points.position.set(-data.globalOffset.x, -data.globalOffset.y, -data.globalOffset.z);
+            if(lidarPoints) viewer.impl.removeOverlay('lidar', lidarPoints);
+            if(!overlayMade){ viewer.impl.createOverlayScene('lidar'); overlayMade = true; }
+            lidarPoints = points;
+            if(lidarVisible) viewer.impl.addOverlay('lidar', points);
+            viewer.impl.invalidate(true, true, true);
+            console.log('lidar overlay ready:', count, 'points');
+        });
+    }
+
+    function findProposedIds() {
+        const tree = viewer && viewer.model && viewer.model.getInstanceTree();
+        const ids = [];
+        if(!tree) return ids;
+        tree.enumNodeChildren(tree.getRootId(), id => {
+            const n = (tree.getNodeName(id) || '').toLowerCase();
+            if(n.indexOf('proposed') !== -1) ids.push(id);
+        }, true);
+        return ids;
+    }
+
+    // Highlight the repair: tint the proposed geometry and select it so it stands out.
+    function highlightProposed() {
+        const ids = findProposedIds();
+        if(!ids.length) return;
+        try {
+            ids.forEach(id => viewer.setThemingColor(id, new THREE.Vector4(1.0, 0.62, 0.0, 0.55)));
+            viewer.select(ids);
+        } catch(e){ console.warn('highlight', e); }
+    }
+
+    function zoomToFix() {
+        const ids = findProposedIds();
+        if(!ids.length) return alert('Toggle "Show proposed repair" first');
+        viewer.fitToView(ids);
+        highlightProposed();
+    }
+
+    function togglePoints() {
+        if(!lidarPoints){ alert('No point cloud available for this location'); return; }
+        lidarVisible = !lidarVisible;
+        if(lidarVisible) viewer.impl.addOverlay('lidar', lidarPoints);
+        else viewer.impl.removeOverlay('lidar', lidarPoints);
+        viewer.impl.invalidate(true, true, true);
     }
 
     init();

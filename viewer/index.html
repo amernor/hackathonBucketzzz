@@ -1,15 +1,197 @@
-<!doctype html><html><head>
-<meta charset="utf-8">
-<link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css">
-<script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
-<style>#v{position:absolute;inset:0}</style>
-</head><body>
-<div style="position:absolute;z-index:9;top:8px;left:8px">
-  <button onclick="moveCar()">Move selected car</button>
-  <button onclick="deleteCar()">Delete selected car</button>
-  <button onclick="togglePoints()">Toggle point cloud</button>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CurbCheck | Somerville ADA</title>
+    <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
+    <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css" type="text/css">
+    <style>
+        :root { --border: #e2e8f0; --coral: #ff6b6b; --blue: #4dabf7; --gray: #868e96; --green: #40c057; --red: #fa5252; }
+        body { font-family: sans-serif; margin: 0; background: #f8f9fa; color: #333; }
+        header { background: white; padding: 1.5rem; border-bottom: 1px solid var(--border); }
+        .container { display: flex; height: calc(100vh - 85px); }
+        #view-a { padding: 2rem; max-width: 800px; margin: 0 auto; width: 100%; }
+        .card { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; cursor: pointer; }
+        .card.priority-high { border-left: 4px solid var(--coral); }
+        .badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 0.5rem; color: white;}
+        .badge.coral { background: var(--coral); } .badge.blue { background: var(--blue); } .badge.red-text { color: var(--red); background: #ffe3e3; }
+        #view-b { display: none; width: 100%; height: 100%; }
+        .sidebar { width: 320px; background: white; border-right: 1px solid var(--border); padding: 1.5rem; overflow-y: auto; }
+        .viewer-container { flex-grow: 1; position: relative; }
+        #aps-viewer { width: 100%; height: 100%; }
+        .violation-list { list-style: none; padding: 0; }
+        .violation-list li { margin-bottom: 0.75rem; font-size: 0.85rem; padding: 0.5rem; background: #f8f9fa; border-left: 2px solid var(--red); }
+        .violation-list li.resolved { border-left-color: var(--green); }
+        .repair-btn { display: block; width: 100%; text-align: left; border: 1px solid var(--border); padding: 1rem; border-radius: 6px; margin-bottom: 0.5rem; cursor: pointer; background: white;}
+        .repair-btn.active { border-color: var(--blue); }
+        .impact-panel { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); display: none; }
+        .toggle-container { position: absolute; top: 1rem; right: 1rem; z-index: 10; background: white; padding: 0.75rem; border-radius: 8px; display: none; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    </style>
+</head>
+<body>
+<header>
+    <h1 style="margin:0;">CurbCheck — Somerville ADA Accessibility</h1>
+    <p style="margin:0; color:gray;">Known violations mapped to Cyvl data. Visualized in 3D.</p>
+</header>
+<div class="container">
+    <div id="view-a"><div id="location-list">Loading...</div></div>
+    <div id="view-b">
+        <div class="sidebar">
+            <button onclick="showViewA()" style="margin-bottom:1rem; cursor:pointer;">← Back</button>
+            <h2 id="detail-name" style="margin:0;"></h2>
+            <p id="detail-address" style="color:gray; font-size:0.9rem; margin-bottom:1rem;"></p>
+            <ul class="violation-list" id="violation-list"></ul>
+            <div id="repair-options"></div>
+            <div class="impact-panel" id="impact-panel">
+                <div style="font-size:2rem; font-weight:bold;" id="impact-cost"></div>
+                <div id="impact-resolved" style="margin-bottom:1rem;"></div>
+                <div id="impact-permit" style="font-weight:bold;"></div>
+                <div id="impact-grant" style="color:green; font-size:0.8rem; margin-top:0.5rem;"></div>
+            </div>
+        </div>
+        <div class="viewer-container">
+            <div class="toggle-container" id="repair-toggle">
+                <label><input type="checkbox" id="show-proposed-cb" onchange="toggleViewer()"> Show proposed repair</label>
+                <div id="urn-status" style="font-size: 0.8rem; color: gray;"></div>
+            </div>
+            <div id="aps-viewer"></div>
+        </div>
+    </div>
 </div>
-<div id="v"></div>
-<script>const URN="dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6Y3l2bC1oYWNrLXhhdmllci9zY2VuZV9jYWRfdjYuemlw";</script>
-<script src="viewer.js"></script>
-</body></html>
+<script>
+    let viewer, currentLoc, currentRepair, baselineUrn, proposedUrn, locCache;
+    let viewerReady=false, viewerIniting=false, pendingUrn=null;
+    const fMoney = n => '$' + n.toLocaleString();
+
+    async function init() {
+        const res = await fetch('/api/locations');
+        const locs = await res.json();
+        document.getElementById('location-list').innerHTML = locs.map(l => `
+            <div class="card ${l.priority==='high'?'priority-high':''}" onclick="loadLoc('${l.id}')">
+                <span class="badge ${l.source.includes('Vision Zero')?'coral':'blue'}">${l.source}</span>
+                <span class="badge red-text">${l.violation_count} Violations</span>
+                <div style="font-weight:bold; font-size:1.1rem; margin-top:0.5rem;">${l.label}</div>
+                <div style="font-size:0.9rem;">${l.complaint_summary}</div>
+            </div>`).join('');
+    }
+
+    function showViewA() {
+        document.getElementById('view-a').style.display='block';
+        document.getElementById('view-b').style.display='none';
+        if(viewer) viewer.finish();
+        viewer=null; viewerReady=false; viewerIniting=false; pendingUrn=null;
+    }
+
+    async function loadLoc(id) {
+        currentLoc=id; currentRepair=null;
+        document.getElementById('view-a').style.display='none';
+        document.getElementById('view-b').style.display='flex';
+        document.getElementById('impact-panel').style.display='none';
+        document.getElementById('repair-toggle').style.display='none';
+
+        const res = await fetch(`/api/location/${id}`);
+        locCache = await res.json();
+        document.getElementById('detail-name').innerText=locCache.label;
+        document.getElementById('detail-address').innerText=locCache.address;
+
+        renderV(locCache.violations, []);
+        document.getElementById('repair-options').innerHTML = locCache.repair_options.map(o => `
+            <button class="repair-btn" id="btn-${o.id}" onclick="selRepair('${o.id}')">
+                <b>${o.label}</b><br><small>${fMoney(o.cost_low)} - ${fMoney(o.cost_high)}</small>
+            </button>`).join('');
+
+        initViewer();
+        fetch(`/api/urn/${id}/baseline`).then(r=>r.json()).then(d=>{
+            if(d.status==='ready') { baselineUrn=d.urn; loadModel(baselineUrn); }
+        });
+    }
+
+    function renderV(vols, resIds) {
+        document.getElementById('violation-list').innerHTML = vols.map(v => {
+            const res = resIds.includes(v.dimension);
+            return `<li class="${res?'resolved':''}">${res?'✓':'✗'} <b>${v.dimension}</b><br>${v.detail}<br><small style="color:gray;">Cyvl: ${v.cyvl_source}</small></li>`;
+        }).join('');
+    }
+
+    async function selRepair(rId) {
+        currentRepair = rId;
+        document.querySelectorAll('.repair-btn').forEach(b=>b.classList.remove('active'));
+        document.getElementById(`btn-${rId}`).classList.add('active');
+        document.getElementById('show-proposed-cb').checked=false;
+
+        const res = await fetch(`/api/impact/${currentLoc}/${rId}`);
+        const imp = await res.json();
+
+        document.getElementById('impact-panel').style.display='block';
+        document.getElementById('impact-cost').innerText = `${fMoney(imp.cost_low)} - ${fMoney(imp.cost_high)}`;
+        document.getElementById('impact-resolved').innerText = `${imp.violations_resolved} of ${imp.violations_total} fixed`;
+        document.getElementById('impact-permit').innerText = imp.permit_label;
+        document.getElementById('impact-grant').innerText = imp.grant_eligible ? imp.grant_note : '';
+
+        const opt = locCache.repair_options.find(r=>r.id===rId);
+        renderV(locCache.violations, opt.resolves);
+
+        document.getElementById('repair-toggle').style.display='block';
+        pollUrn();
+    }
+
+    async function pollUrn() {
+        proposedUrn = null;
+        document.getElementById('urn-status').innerText = "Checking repair model...";
+        const check = async () => {
+            if(!currentRepair) return;
+            const res = await fetch(`/api/urn/${currentLoc}/${currentRepair}`);
+            const d = await res.json();
+            if(d.status==='ready') { proposedUrn=d.urn; document.getElementById('urn-status').innerText="Ready."; }
+            else { document.getElementById('urn-status').innerText="Generating (~2m)..."; setTimeout(check,10000); }
+        }; check();
+    }
+
+    function toggleViewer() {
+        const show = document.getElementById('show-proposed-cb').checked;
+        if(show && proposedUrn) loadModel(proposedUrn);
+        else if(!show && baselineUrn) loadModel(baselineUrn);
+    }
+
+    function initViewer() {
+        if(viewer || viewerIniting) return;
+        viewerIniting = true;
+        Autodesk.Viewing.Initializer({env:'AutodeskProduction2', api:'streamingV2', getAccessToken: async(cb)=>{
+            const r = await fetch('/api/token'); const d = await r.json(); cb(d.access_token, d.expires_in || 3600);
+        }}, () => {
+            viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('aps-viewer'));
+            viewer.start();
+            try {
+                viewer.setQualityLevel(true, true);            // ambient occlusion + anti-aliasing
+                viewer.setGroundShadow(true);                  // contact shadow under geometry
+                viewer.setLightPreset(4);                      // bright outdoor lighting
+                viewer.setBackgroundColor(232,238,245, 200,210,224);  // soft sky gradient
+            } catch(e){ console.warn('viewer style setup skipped:', e); }
+            // Survey data is Z-up; the viewer defaults to Y-up (tilted/top-down home view).
+            // Fix the up vector and frame the model each time geometry finishes loading.
+            viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, () => {
+                try { viewer.navigation.setWorldUpVector(new THREE.Vector3(0,0,1), true); } catch(e){}
+                viewer.fitToView();
+            });
+            viewerReady = true;
+            if(pendingUrn){ const u = pendingUrn; pendingUrn = null; loadModel(u); }
+        });
+    }
+
+    function loadModel(urn) {
+        if(!viewerReady){ pendingUrn = urn; return; }   // viewer still initializing — load when ready
+        Autodesk.Viewing.Document.load('urn:'+urn, doc => {
+            const root = doc.getRoot();
+            const geo = root.getDefaultGeometry() || root.search({'type':'geometry','role':'3d'})[0];
+            viewer.loadDocumentNode(doc, geo);
+        }, (code, msg) => {
+            console.error('APS Document.load failed:', code, msg);
+            const s = document.getElementById('urn-status'); if(s) s.innerText = 'Viewer load error '+code;
+        });
+    }
+
+    init();
+</script>
+</body>
+</html>
